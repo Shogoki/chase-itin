@@ -1,0 +1,93 @@
+<!doctype html>
+<!--
+  Browser test for src/inject.js. Serve the repo root over HTTP and open this page:
+    python3 -m http.server 8765   →   http://localhost:8765/test/harness.html
+  fetch and XMLHttpRequest.send are stubbed before inject.js loads, so nothing
+  is sent over the network; the stubs record what would have been sent.
+-->
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>ITIN Helper tests</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 2rem; }
+    .pass { color: #137333; } .fail { color: #c5221f; }
+  </style>
+  <script>
+    window.__sent = [];
+    window.fetch = async (input, init) => {
+      const body = input instanceof Request ? await input.text() : init?.body;
+      window.__sent.push({ via: 'fetch', body });
+      return new Response('{}');
+    };
+    XMLHttpRequest.prototype.send = function (body) {
+      window.__sent.push({ via: 'xhr', body });
+    };
+  </script>
+  <script src="../src/inject.js"></script>
+</head>
+<body>
+  <h1>ITIN Helper tests</h1>
+  <ul id="results"></ul>
+  <script>
+    const TARGET = 'https://secure.chase.com/svc/wl/auth/public/v4/user/enrollment/form/list';
+    const BODY = 'accountNumber=TEST&ssn=111111111&enrollmentType=INDIVIDUAL';
+    const EXPECTED = 'accountNumber=TEST&tin=111111111&enrollmentType=INDIVIDUAL';
+
+    async function lastSent(send) {
+      window.__sent = [];
+      await send();
+      const body = window.__sent.at(-1)?.body;
+      return body instanceof URLSearchParams || body instanceof FormData
+        ? new URLSearchParams(body).toString()
+        : body;
+    }
+
+    function xhr(url, body) {
+      const request = new XMLHttpRequest();
+      request.open('POST', url);
+      request.send(body);
+    }
+
+    const cases = [
+      ['fetch: string body is rewritten', () => fetch(TARGET, { method: 'POST', body: BODY }), EXPECTED],
+      ['fetch: relative URL is rewritten', () => fetch('/svc/wl/auth/public/v4/user/enrollment/form/list', { method: 'POST', body: BODY }), EXPECTED],
+      ['fetch: future API version is rewritten', () => fetch(TARGET.replace('/v4/', '/v5/'), { method: 'POST', body: BODY }), EXPECTED],
+      ['fetch: Request object is rewritten', () => fetch(new Request(TARGET, { method: 'POST', body: BODY })), EXPECTED],
+      ['fetch: URLSearchParams body is rewritten', () => fetch(TARGET, { method: 'POST', body: new URLSearchParams(BODY) }), EXPECTED],
+      ['fetch: FormData body is rewritten', () => {
+        const form = new FormData();
+        for (const [k, v] of new URLSearchParams(BODY)) form.append(k, v);
+        return fetch(TARGET, { method: 'POST', body: form });
+      }, EXPECTED],
+      ['fetch: other URLs are untouched', () => fetch('https://secure.chase.com/svc/other', { method: 'POST', body: BODY }), BODY],
+      ['fetch: only the ssn key is renamed', () => fetch(TARGET, { method: 'POST', body: 'accountNumber=ssn123&ssn=1&xssn=2' }), 'accountNumber=ssn123&tin=1&xssn=2'],
+      ['fetch: existing tin field is left alone', () => fetch(TARGET, { method: 'POST', body: 'ssn=1&tin=2' }), 'ssn=1&tin=2'],
+      ['xhr: string body is rewritten', () => xhr(TARGET, BODY), EXPECTED],
+      ['xhr: other URLs are untouched', () => xhr('https://secure.chase.com/svc/other', BODY), BODY],
+      ['xhr: reused for another URL is untouched', () => {
+        const request = new XMLHttpRequest();
+        request.open('POST', TARGET);
+        request.open('POST', 'https://secure.chase.com/svc/other');
+        request.send(BODY);
+      }, BODY],
+    ];
+
+    (async () => {
+      const results = [];
+      for (const [name, send, expected] of cases) {
+        let actual;
+        try { actual = await lastSent(send); } catch (error) { actual = `threw ${error}`; }
+        const pass = actual === expected;
+        results.push({ name, pass, actual, expected });
+        const li = document.createElement('li');
+        li.className = pass ? 'pass' : 'fail';
+        li.textContent = `${pass ? 'PASS' : 'FAIL'} ${name}` + (pass ? '' : ` — expected "${expected}", got "${actual}"`);
+        document.getElementById('results').append(li);
+      }
+      window.__results = results;
+      document.title = results.every((r) => r.pass) ? 'ALL PASS' : 'FAILURES';
+    })();
+  </script>
+</body>
+</html>
